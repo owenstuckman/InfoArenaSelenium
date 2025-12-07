@@ -1,8 +1,7 @@
+// src/server.ts
 import express from 'express';
 import cors from 'cors';
-
-// If you're using TS, ensure tsconfig + build step.
-// Or convert to JS if you prefer.
+import type { Request, Response } from 'express';
 
 const app = express();
 app.use(cors());
@@ -24,9 +23,11 @@ interface GrokipediaResult {
   };
 }
 
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', (_req: Request, res: Response) => {
+  return res.json({ ok: true });
+});
 
-app.get('/scrape/grokipedia', async (req, res) => {
+app.get('/scrape/grokipedia', async (req: Request, res: Response) => {
   const topic = String(req.query.topic ?? '').trim();
   const debugEnabled = String(req.query.debug ?? '') === '1';
 
@@ -85,6 +86,7 @@ app.listen(PORT, () => {
 
 /**
  * Build URL patterns to maximize hit rate.
+ * Example: https://grokipedia.com/page/Chinese_language
  */
 function buildUrlPatterns(topic: string): string[] {
   const baseSlug = topic.replace(/\s+/g, '_');
@@ -119,8 +121,9 @@ async function trySelenium(
   debugNotes: string[]
 ): Promise<GrokipediaResult | null> {
   try {
-    // Use require-style dynamic import compatibility in Node runtime
+    // Dynamic imports to avoid hard-failing environments without selenium/chrome
     const selenium = await import('selenium-webdriver');
+    // @ts-expect-error - selenium chrome subpath types can be flaky in ESM
     const chrome = await import('selenium-webdriver/chrome');
 
     const { Builder, By } = selenium;
@@ -164,9 +167,11 @@ async function trySelenium(
             // continue anyway
           }
 
+          // DOM-based HTML extraction to preserve formatting + links
           const extracted = await driver.executeScript(
             function (topicName: string) {
               try {
+                // Conservative cleanup:
                 const killSelectors = [
                   'script',
                   'style',
@@ -245,7 +250,7 @@ async function trySelenium(
             }
           }
 
-          // Secondary fallback: full body
+          // Secondary fallback: use hydrated full body HTML
           const bodyExtract = await driver.executeScript(function () {
             try {
               const html = document.body?.innerHTML || '';
@@ -381,25 +386,40 @@ async function tryFetch(
 }
 
 /* --------------------------- HTML → MARKDOWN -------------------------- */
-
+/**
+ * Converts HTML into Markdown while preserving:
+ * - headings
+ * - bold/italic
+ * - lists
+ * - blockquotes
+ * - code/pre
+ * - links
+ *
+ * Conservative and general.
+ */
 function parseHtmlToMarkdown(html: string, titleFallback: string): string {
   let content = html;
 
+  // Remove scripts/styles early
   content = content.replace(/<script[\s\S]*?<\/script>/gi, '');
   content = content.replace(/<style[\s\S]*?<\/style>/gi, '');
 
+  // Preserve line breaks
   content = content.replace(/<br\s*\/?>/gi, '\n');
 
+  // Preserve preformatted code blocks
   content = content.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (_m, inner) => {
     const cleaned = stripTags(inner);
     return `\n\`\`\`\n${decodeEntities(cleaned).trim()}\n\`\`\`\n`;
   });
 
+  // Preserve inline code
   content = content.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, (_m, inner) => {
     const cleaned = decodeEntities(stripTags(inner)).replace(/\s+/g, ' ').trim();
     return cleaned ? `\`${cleaned}\`` : '';
   });
 
+  // Convert links BEFORE stripping tags
   content = content.replace(
     /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
     (_match, href, inner) => {
@@ -409,12 +429,14 @@ function parseHtmlToMarkdown(html: string, titleFallback: string): string {
     }
   );
 
+  // Images -> keep alt text if present
   content = content.replace(
     /<img\s+[^>]*alt=["']([^"']*)["'][^>]*>/gi,
     (_m, alt) => (alt ? `\n\n![${decodeEntities(alt)}]\n\n` : '')
   );
   content = content.replace(/<img\s+[^>]*>/gi, '');
 
+  // Headings
   content = content.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n');
   content = content.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n');
   content = content.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n');
@@ -422,21 +444,31 @@ function parseHtmlToMarkdown(html: string, titleFallback: string): string {
   content = content.replace(/<h5[^>]*>([\s\S]*?)<\/h5>/gi, '\n##### $1\n');
   content = content.replace(/<h6[^>]*>([\s\S]*?)<\/h6>/gi, '\n###### $1\n');
 
+  // Blockquotes
   content = content.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, '\n> $1\n');
+
+  // Paragraphs
   content = content.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '\n$1\n');
 
+  // Lists
   content = content.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1');
   content = content.replace(/<\/?[uo]l[^>]*>/gi, '\n');
 
+  // Bold/italic
   content = content.replace(/<(strong|b)[^>]*>([\s\S]*?)<\/(strong|b)>/gi, '**$2**');
   content = content.replace(/<(em|i)[^>]*>([\s\S]*?)<\/(em|i)>/gi, '*$2*');
 
+  // Remove remaining tags
   content = stripTags(content);
+
+  // Decode entities
   content = decodeEntities(content);
 
+  // Clean whitespace
   content = content.replace(/[ \t]+\n/g, '\n');
   content = content.replace(/\n{3,}/g, '\n\n').trim();
 
+  // Ensure top-level title
   if (!content.startsWith('#')) {
     const safeTitle = titleFallback?.trim() || 'Untitled';
     content = `# ${safeTitle}\n\n${content}`;
